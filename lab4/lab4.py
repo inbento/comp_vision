@@ -178,7 +178,6 @@ def full_canny(path):
     
     return final_edges
         
-
 def main():
     image_path = r"E:/GitHub/comp_vision/lab4/img.jpg"
     full_canny(image_path)

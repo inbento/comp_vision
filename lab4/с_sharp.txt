@@ -1,0 +1,357 @@
+using System;
+using OpenCvSharp;
+
+class Program
+{
+    static void Main(string[] args)
+    {
+        string imagePath = @"C:\1.jpg";
+        ProcessImage(imagePath);
+    }
+
+    static Mat CreateGaussKernel(int size, double sigma)
+    {
+        Mat kernel = new Mat(size, size, MatType.CV_64FC1, Scalar.All(0));
+        int center = size / 2;
+
+        for (int i = 0; i < size; i++)
+        {
+            for (int j = 0; j < size; j++)
+            {
+                double x = i - center;
+                double y = j - center;
+                kernel.Set<double>(i, j, (1.0 / (2 * Math.PI * sigma * sigma)) * Math.Exp(-(x * x + y * y) / (2 * sigma * sigma)));
+            }
+        }
+
+        return kernel;
+    }
+
+    static Mat NormalizeKernel(Mat kernel)
+    {
+        Scalar sum = Cv2.Sum(kernel);
+        Mat normalized = kernel / sum.Val0;
+        return normalized;
+    }
+
+    static Mat ApplyGaussFilter(Mat image, Mat kernel)
+    {
+        Mat filteredImage = new Mat();
+        image.CopyTo(filteredImage);
+
+        int kernelSize = kernel.Rows;
+        int padding = kernelSize / 2;
+
+        for (int y = padding; y < image.Rows - padding; y++)
+        {
+            for (int x = padding; x < image.Cols - padding; x++)
+            {
+                double newValue = 0;
+
+                for (int k = 0; k < kernelSize; k++)
+                {
+                    for (int l = 0; l < kernelSize; l++)
+                    {
+                        double pixelValue = image.At<byte>(y + k - padding, x + l - padding);
+                        double kernelValue = kernel.At<double>(k, l);
+                        newValue += pixelValue * kernelValue;
+                    }
+                }
+
+                filteredImage.Set<byte>(y, x, (byte)Math.Round(newValue));
+            }
+        }
+
+        return filteredImage;
+    }
+
+    static void SobelOperator(Mat image, out Mat magnitude, out Mat angle)
+    {
+        int height = image.Rows;
+        int width = image.Cols;
+
+        double[,] GxKernel = { { -1, 0, 1 }, { -2, 0, 2 }, { -1, 0, 1 } };
+        double[,] GyKernel = { { -1, -2, -1 }, { 0, 0, 0 }, { 1, 2, 1 } };
+
+        magnitude = new Mat(height, width, MatType.CV_64FC1, Scalar.All(0));
+        angle = new Mat(height, width, MatType.CV_64FC1, Scalar.All(0));
+
+        for (int y = 1; y < height - 1; y++)
+        {
+            for (int x = 1; x < width - 1; x++)
+            {
+                double gxVal = 0;
+                double gyVal = 0;
+
+                for (int i = 0; i < 3; i++)
+                {
+                    for (int j = 0; j < 3; j++)
+                    {
+                        byte pixelValue = image.At<byte>(y + i - 1, x + j - 1);
+                        gxVal += pixelValue * GxKernel[i, j];
+                        gyVal += pixelValue * GyKernel[i, j];
+                    }
+                }
+
+                double mag = Math.Sqrt(gxVal * gxVal + gyVal * gyVal);
+                magnitude.Set<double>(y, x, mag);
+
+                if (gxVal != 0)
+                {
+                    double angleRad = Math.Atan2(gyVal, gxVal);
+                    double angleDeg = angleRad * (180.0 / Math.PI);
+
+                    if (angleDeg < 0)
+                        angleDeg += 180;
+
+                    angle.Set<double>(y, x, angleDeg);
+                }
+            }
+        }
+    }
+
+    static int GetDirection(double angle)
+    {
+        if (angle < 0)
+            angle += 180;
+
+        double tg = (angle != 90) ? Math.Tan(angle * Math.PI / 180.0) : double.PositiveInfinity;
+
+        if (0 <= angle && angle < 90)
+        {
+            if (tg < -2.414)
+                return 0;
+            else if (-2.414 <= tg && tg < -0.414)
+                return 1;
+            else if (-0.414 <= tg && tg < 0.414)
+                return 2;
+            else // 0.414 <= tg
+                return 3;
+        }
+        else // 90 <= angle < 180
+        {
+            if (tg > 2.414)
+                return 4;
+            else if (0.414 < tg && tg <= 2.414)
+                return 5;
+            else if (-0.414 <= tg && tg <= 0.414)
+                return 6;
+            else // tg < -0.414
+                return 7;
+        }
+    }
+
+    static Mat NonMaximumSuppression(Mat magnitude, Mat angle)
+    {
+        int height = magnitude.Rows;
+        int width = magnitude.Cols;
+        Mat suppressed = new Mat(height, width, MatType.CV_64FC1, Scalar.All(0));
+
+        for (int y = 1; y < height - 1; y++)
+        {
+            for (int x = 1; x < width - 1; x++)
+            {
+                double currentAngle = angle.At<double>(y, x);
+                double currentMagnitude = magnitude.At<double>(y, x);
+
+                int direction = GetDirection(currentAngle);
+
+                double neighbor1 = 0;
+                double neighbor2 = 0;
+
+                switch (direction)
+                {
+                    case 0: // 0
+                        neighbor1 = magnitude.At<double>(y, x - 1);
+                        neighbor2 = magnitude.At<double>(y, x + 1);
+                        break;
+                    case 1: // 22.5
+                        neighbor1 = magnitude.At<double>(y - 1, x + 1);
+                        neighbor2 = magnitude.At<double>(y + 1, x - 1);
+                        break;
+                    case 2: // 45
+                        neighbor1 = magnitude.At<double>(y - 1, x);
+                        neighbor2 = magnitude.At<double>(y + 1, x);
+                        break;
+                    case 3: // 67.5
+                        neighbor1 = magnitude.At<double>(y - 1, x - 1);
+                        neighbor2 = magnitude.At<double>(y + 1, x + 1);
+                        break;
+                    case 4: // 90
+                        neighbor1 = magnitude.At<double>(y, x - 1);
+                        neighbor2 = magnitude.At<double>(y, x + 1);
+                        break;
+                    case 5: // 112.5
+                        neighbor1 = magnitude.At<double>(y - 1, x + 1);
+                        neighbor2 = magnitude.At<double>(y + 1, x - 1);
+                        break;
+                    case 6: // 135
+                        neighbor1 = magnitude.At<double>(y - 1, x);
+                        neighbor2 = magnitude.At<double>(y + 1, x);
+                        break;
+                    case 7: // 157.5
+                        neighbor1 = magnitude.At<double>(y - 1, x - 1);
+                        neighbor2 = magnitude.At<double>(y + 1, x + 1);
+                        break;
+                }
+
+                if (currentMagnitude >= neighbor1 && currentMagnitude >= neighbor2)
+                    suppressed.Set<double>(y, x, currentMagnitude);
+                else
+                    suppressed.Set<double>(y, x, 0);
+            }
+        }
+
+        return suppressed;
+    }
+
+    static Mat DoubleThresholdFiltering(Mat suppressedMagnitude, double lowRatio = 0.01, double highRatio = 0.10)
+    {
+        int height = suppressedMagnitude.Rows;
+        int width = suppressedMagnitude.Cols;
+        Mat result = new Mat(height, width, MatType.CV_8UC1, Scalar.All(0));
+
+        Cv2.MinMaxLoc(suppressedMagnitude, out _, out double maxGrad);
+
+        double lowLevel = maxGrad * lowRatio;
+        double highLevel = maxGrad * highRatio;
+
+        Console.WriteLine($"Максимальный градиент: {maxGrad:F2}");
+        Console.WriteLine($"Нижний порог: {lowLevel:F2}");
+        Console.WriteLine($"Верхний порог: {highLevel:F2}");
+
+        Mat strongEdges = new Mat(height, width, MatType.CV_8UC1, Scalar.All(0));
+        Mat weakEdges = new Mat(height, width, MatType.CV_8UC1, Scalar.All(0));
+
+
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                double gradValue = suppressedMagnitude.At<double>(y, x);
+
+                if (gradValue >= highLevel)
+                {
+                    strongEdges.Set<byte>(y, x, 255);
+                    result.Set<byte>(y, x, 255);
+                }
+                else if (gradValue >= lowLevel)
+                {
+                    weakEdges.Set<byte>(y, x, 255);
+                    result.Set<byte>(y, x, 128);
+                }
+                else
+                {
+                    result.Set<byte>(y, x, 0);
+                }
+            }
+        }
+
+        Mat finalResult = new Mat();
+        result.CopyTo(finalResult);
+
+        for (int y = 1; y < height - 1; y++)
+        {
+            for (int x = 1; x < width - 1; x++)
+            {
+                if (weakEdges.At<byte>(y, x) == 255)
+                {
+                    bool hasStrongNeighbor = false;
+
+                    for (int dy = -1; dy <= 1 && !hasStrongNeighbor; dy++)
+                    {
+                        for (int dx = -1; dx <= 1; dx++)
+                        {
+                            if (dy == 0 && dx == 0) continue;
+
+                            int ny = y + dy;
+                            int nx = x + dx;
+
+                            if (ny >= 0 && ny < height && nx >= 0 && nx < width)
+                            {
+                                if (strongEdges.At<byte>(ny, nx) == 255)
+                                {
+                                    hasStrongNeighbor = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (hasStrongNeighbor)
+                        finalResult.Set<byte>(y, x, 255);
+                    else
+                        finalResult.Set<byte>(y, x, 0);
+                }
+            }
+        }
+
+        return finalResult;
+    }
+
+    static void ProcessImage(string imagePath)
+    {
+
+        Mat image = Cv2.ImRead(imagePath);
+        if (image.Empty())
+        {
+            Console.WriteLine($"Ошибка: не удалось загрузить изображение {imagePath}");
+            return;
+        }
+
+        Mat grayImage = new Mat();
+        Cv2.CvtColor(image, grayImage, ColorConversionCodes.BGR2GRAY);
+
+        Cv2.ImShow("1. Original", grayImage);
+        Cv2.WaitKey(0);
+
+        int kernelSize = 5;
+        double sigma = 15;
+        Mat kernel = CreateGaussKernel(kernelSize, sigma);
+        kernel = NormalizeKernel(kernel);
+        Mat filteredImage = ApplyGaussFilter(grayImage, kernel);
+
+        Cv2.ImShow("2. Gauss", filteredImage);
+        Cv2.WaitKey(0);
+
+        Mat magnitude, angle;
+        SobelOperator(filteredImage, out magnitude, out angle);
+
+        Mat magnitudeNormalized = new Mat();
+        Cv2.Normalize(magnitude, magnitudeNormalized, 0, 255, NormTypes.MinMax);
+        magnitudeNormalized.ConvertTo(magnitudeNormalized, MatType.CV_8UC1);
+
+        Mat angleNormalized = new Mat();
+        Cv2.Normalize(angle, angleNormalized, 0, 255, NormTypes.MinMax);
+        angleNormalized.ConvertTo(angleNormalized, MatType.CV_8UC1);
+
+        Cv2.ImShow("3. Magnitude (dlina grad)", magnitudeNormalized);
+        Cv2.WaitKey(0);
+
+        Cv2.ImShow("4. Angle", angleNormalized);
+        Cv2.WaitKey(0);
+
+        Mat suppressed = NonMaximumSuppression(magnitude, angle);
+
+        Mat suppressedNormalized = new Mat();
+        Cv2.Normalize(suppressed, suppressedNormalized, 0, 255, NormTypes.MinMax);
+        suppressedNormalized.ConvertTo(suppressedNormalized, MatType.CV_8UC1);
+
+        Cv2.ImShow("5. Supress nemax", suppressedNormalized);
+        Cv2.WaitKey(0);
+
+        Mat finalEdges = DoubleThresholdFiltering(suppressed);
+
+        Cv2.ImShow("6. Double threshold", finalEdges);
+        Cv2.WaitKey(0);
+
+        Cv2.ImWrite("1_original.jpg", grayImage);
+        Cv2.ImWrite("2_gaussian.jpg", filteredImage);
+        Cv2.ImWrite("3_gradient_magnitude.jpg", magnitudeNormalized);
+        Cv2.ImWrite("4_gradient_angle.jpg", angleNormalized);
+        Cv2.ImWrite("5_non_max_suppression.jpg", suppressedNormalized);
+        Cv2.ImWrite("6_final_edges.jpg", finalEdges);
+
+        Cv2.DestroyAllWindows();
+    }
+}
